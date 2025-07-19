@@ -5,7 +5,7 @@ const server = http.createServer(app);
 const { Server } = require("socket.io");
 const io = new Server(server);
 const path = require('path');
-const fs = require('fs'); // Node.js File System module
+const fs = require('fs');
 
 const {
     default: makeWASocket,
@@ -19,54 +19,61 @@ const pino = require('pino');
 
 const logger = pino({ level: 'info' }).child({ level: 'info', stream: 'baileys' });
 
-// Define a single, default session ID
-const DEFAULT_SESSION_ID = 'default_baileys_session'; // Changed this from constant to const for consistency
+const DEFAULT_SESSION_ID = 'default_baileys_session';
 
-// Serve static files from the 'public' directory
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Map to store active Baileys sessions
-// We'll still use a map, but it will likely only hold one entry for DEFAULT_SESSION_ID
 const activeSessions = new Map();
 
-// Function to start or reconnect a Baileys session
-// sessionId parameter is now expected to be DEFAULT_SESSION_ID
 async function startBaileys(sessionId, authMethod = 'qr', phoneNumber = null, clientSocket) {
     logger.info(`[${sessionId}] Attempting to start Baileys session with method: ${authMethod}`);
 
-    // --- Cleanup Existing Session if Any ---
-    if (activeSessions.has(sessionId)) {
-        const existingSession = activeSessions.get(sessionId);
-        if (existingSession.sock && existingSession.sock.user) {
-            logger.info(`[${sessionId}] Session already open. Emitting status.`);
+    // --- Critical: Check and Clean up Existing Session ---
+    let existingSession = activeSessions.get(sessionId);
+
+    if (existingSession && existingSession.sock) {
+        if (existingSession.sock.user) { // Already connected/open
+            logger.info(`[${sessionId}] Session already open. Emitting status to client.`);
             clientSocket.emit('connection_status', { connection: 'open', message: 'Bot Connected!' });
             return;
-        } else if (existingSession.sock) {
-            logger.info(`[${sessionId}] Closing previous disconnected socket before re-establishing.`);
+        } else if (existingSession.currentAuthMethod === authMethod && existingSession.clientSocket === clientSocket) {
+             // If the same client initiated the same method and it's still in progress,
+             // just re-emit the current status/QR/pairing code, don't create a new socket.
+             logger.info(`[${sessionId}] Same client re-requested same auth method. Re-emitting current status.`);
+             if (existingSession.qrData) { // Check if QR data was already generated
+                 clientSocket.emit('qr', existingSession.qrData);
+                 clientSocket.emit('connection_status', { connection: 'connecting', message: 'Scan QR code' });
+             } else if (existingSession.pairingCode) { // Check if pairing code was already generated
+                 clientSocket.emit('pairing_code', existingSession.pairingCode);
+                 clientSocket.emit('connection_status', { connection: 'connecting', message: 'Enter pairing code' });
+             } else {
+                 clientSocket.emit('connection_status', { connection: 'connecting', message: 'Generating code...' });
+             }
+             return;
+        } else {
+            // A different client or method, or existing socket is just hanging, end it.
+            logger.info(`[${sessionId}] Ending previous socket before re-establishing for new request.`);
             try {
-                await existingSession.sock.end(new Boom('Reconnecting initiated by user', { statusCode: DisconnectReason.restarting }));
+                await existingSession.sock.end(new Boom('New authentication request', { statusCode: DisconnectReason.restarting }));
             } catch (e) {
-                logger.warn(`[${sessionId}] Error ending previous socket:`, e);
+                logger.warn(`[${sessionId}] Error ending previous socket:`, e.message); // Log message, not full error trace
             }
             activeSessions.delete(sessionId);
+            existingSession = null; // Clear reference
         }
     }
 
-    // Define auth folder path using the fixed session ID
     const authFolderPath = path.join(__dirname, 'auth_info_baileys', sessionId);
-
-    // Ensure the auth folder exists
     if (!fs.existsSync(authFolderPath)) {
         fs.mkdirSync(authFolderPath, { recursive: true });
         logger.info(`[${sessionId}] Created auth folder: ${authFolderPath}`);
     }
 
     const { state, saveCreds } = await useMultiFileAuthState(authFolderPath);
-
     const { version, isLatest } = await fetchLatestBaileysVersion();
     logger.info(`[${sessionId}] Using WA v${version.join('.')}, isLatest: ${isLatest}`);
 
@@ -79,62 +86,82 @@ async function startBaileys(sessionId, authMethod = 'qr', phoneNumber = null, cl
         pairingCode: authMethod === 'pairing' ? phoneNumber : undefined,
     });
 
-    activeSessions.set(sessionId, { sock, authState: state, saveCreds, clientSocket });
+    // Store the new session details
+    activeSessions.set(sessionId, {
+        sock,
+        authState: state,
+        saveCreds,
+        clientSocket, // Keep a reference to the initiating client socket
+        currentAuthMethod: authMethod, // Store the method initiated
+        qrData: null, // To store QR data if generated
+        pairingCode: null // To store pairing code if generated
+    });
 
     sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr, isNewLogin } = update; // Removed 'is' as it was incorrect, replaced with isNewLogin
+        const { connection, lastDisconnect, qr, isNewLogin } = update;
         logger.info(`[${sessionId}] Connection update: ${connection}, isNewLogin: ${isNewLogin}, qr: ${!!qr}`);
+
+        // Get the current session details from the map, important if multiple clients interact
+        const currentSession = activeSessions.get(sessionId);
+        if (!currentSession || currentSession.sock !== sock) {
+            // This update is for an old/stale socket, ignore it
+            logger.warn(`[${sessionId}] Ignoring update for stale socket.`);
+            return;
+        }
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom) && lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut;
             logger.info(`[${sessionId}] Connection closed due to `, lastDisconnect.error);
-            clientSocket.emit('connection_status', { connection: 'close', reason: lastDisconnect.error.output.statusCode === DisconnectReason.loggedOut ? 'loggedOut' : 'reconnecting' });
+            // Emit to the client that initiated this specific session if still connected
+            currentSession.clientSocket.emit('connection_status', { connection: 'close', reason: lastDisconnect.error.output.statusCode === DisconnectReason.loggedOut ? 'loggedOut' : 'reconnecting' });
 
             if (!shouldReconnect) {
                 logger.info(`[${sessionId}] Logged out. Cleaning up session data.`);
                 activeSessions.delete(sessionId);
                 fs.rmSync(authFolderPath, { recursive: true, force: true });
             }
-            // Frontend will handle user re-initiation if needed
+            // If it should reconnect, Baileys internally handles some level of reconnection,
+            // but for UI, we expect user to re-initiate if they see 'close'.
         } else if (connection === 'open') {
             logger.info(`[${sessionId}] Opened connection! Bot is ready.`);
-            clientSocket.emit('connection_status', { connection: 'open', message: 'Bot Connected!' });
+            currentSession.clientSocket.emit('connection_status', { connection: 'open', message: 'Bot Connected!' });
 
             // ⭐ Send "Hi" message to the bot's own private chat for test
-            const testTargetJid = sock.user.id; // Send 'Hi' to the bot's own number
-            if (testTargetJid) {
+            // Only send if it's a truly new login or first time connect
+            // Checking `sock.user` ensures we have the JID.
+            if (sock.user && isNewLogin) { // `isNewLogin` is the key for a fresh auth
+                const testTargetJid = sock.user.id;
                 try {
-                    // To prevent sending 'Hi' on every reconnect (only on initial login after QR/pairing)
-                    // You would typically store a flag in a database. For simple persistent file,
-                    // we can check if it's a truly new login.
-                    // This is heuristic, for production, better store state in a database.
-                    if (isNewLogin) { // This property helps distinguish initial scans
-                         await sock.sendMessage(testTargetJid, { text: 'Hello! I am your Baileys bot and I just logged in successfully! My JID is ' + testTargetJid + ' 🚀' });
-                         logger.info(`[${sessionId}] Sent 'Hello' message to ${testTargetJid} after new login.`);
-                    } else {
-                         logger.info(`[${sessionId}] Reconnected without new login. Not sending 'Hello' message.`);
-                    }
-
+                    await sock.sendMessage(testTargetJid, { text: 'Hello! I am your Baileys bot and I just logged in successfully! My JID is ' + testTargetJid });
+                    logger.info(`[${sessionId}] Sent 'Hello' message to ${testTargetJid} after new login.`);
                 } catch (e) {
                     logger.error(`[${sessionId}] Failed to send 'Hello' message:`, e);
                 }
+            } else if (sock.user && !isNewLogin) {
+                logger.info(`[${sessionId}] Reconnected without new login. Not sending 'Hello' message.`);
             }
+
         } else if (connection === 'connecting') {
-            if (qr && isNewLogin) {
+            if (qr && isNewLogin) { // Only emit QR if a new QR is generated and it's a new login attempt
                 qrcode.toDataURL(qr, (err, url) => {
                     if (err) {
                         logger.error(`[${sessionId}] Error generating QR code:`, err);
-                        clientSocket.emit('error', { message: 'Failed to generate QR code.' });
+                        currentSession.clientSocket.emit('error', { message: 'Failed to generate QR code.' });
                         return;
                     }
-                    clientSocket.emit('qr', url.split(',')[1]);
+                    currentSession.qrData = url.split(',')[1]; // Store the QR data
+                    currentSession.clientSocket.emit('qr', currentSession.qrData);
                     logger.info(`[${sessionId}] QR code generated and sent to frontend.`);
-                    clientSocket.emit('connection_status', { connection: 'connecting', message: 'Scan QR code' });
+                    currentSession.clientSocket.emit('connection_status', { connection: 'connecting', message: 'Scan QR code' });
                 });
-            } else if (update.pairingCode && isNewLogin) {
+            } else if (update.pairingCode && isNewLogin) { // Only emit pairing code if it's generated for a new login
                 logger.info(`[${sessionId}] Pairing Code generated: ${update.pairingCode}`);
-                clientSocket.emit('pairing_code', update.pairingCode);
-                clientSocket.emit('connection_status', { connection: 'connecting', message: 'Enter pairing code' });
+                currentSession.pairingCode = update.pairingCode; // Store the pairing code
+                currentSession.clientSocket.emit('pairing_code', currentSession.pairingCode);
+                currentSession.clientSocket.emit('connection_status', { connection: 'connecting', message: 'Enter pairing code' });
+            } else {
+                 // For other 'connecting' states, e.g., reconnecting after a brief drop
+                 currentSession.clientSocket.emit('connection_status', { connection: 'connecting', message: 'Connecting...' });
             }
         }
     });
@@ -155,26 +182,42 @@ async function startBaileys(sessionId, authMethod = 'qr', phoneNumber = null, cl
     });
 }
 
-// Socket.IO connection handling
 io.on('connection', (socket) => {
     logger.info('A user connected to the web UI.');
 
+    // When a client connects, immediately check status of the DEFAULT_SESSION_ID
+    // and send it to them. This helps in cases where the bot is already running.
+    const existingSession = activeSessions.get(DEFAULT_SESSION_ID);
+    if (existingSession && existingSession.sock && existingSession.sock.user) {
+        socket.emit('connection_status', { connection: 'open', message: 'Bot Connected!' });
+    } else if (existingSession && existingSession.sock) {
+        // If there's an active socket but not yet open (e.g., waiting for QR)
+        socket.emit('connection_status', { connection: 'connecting', message: 'Awaiting QR/Pairing Code Scan' });
+        // Re-send existing QR/pairing code if available
+        if (existingSession.qrData) {
+            socket.emit('qr', existingSession.qrData);
+        } else if (existingSession.pairingCode) {
+            socket.emit('pairing_code', existingSession.pairingCode);
+        }
+    }
+
+
     socket.on('start_auth', async (data) => {
-        const { method, phoneNumber } = data; // sessionId is no longer passed from frontend
-        // Use the hardcoded default session ID
+        const { method, phoneNumber } = data;
         const sessionIdToUse = DEFAULT_SESSION_ID;
         logger.info(`Received start_auth request for method: ${method} for fixed session: ${sessionIdToUse}`);
 
         try {
             await startBaileys(sessionIdToUse, method, phoneNumber, socket);
         } catch (error) {
-            logger.error(`Error starting Baileys for session ${sessionIdToUse}:`, error);
+            logger.error(`Error starting Baileys for session ${sessionIdToUse}:`, error.message); // Log only message for less verbosity
             socket.emit('error', { message: `Failed to start authentication: ${error.message}` });
         }
     });
 
     socket.on('disconnect', () => {
         logger.info('User disconnected from the web UI.');
+        // We don't automatically close the Baileys session here, as it's persistent.
     });
 });
 
