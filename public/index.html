@@ -6,7 +6,7 @@
     <title>Baileys WhatsApp Bot Auth</title>
     <style>
         body {
-            font-family: sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             display: flex;
             flex-direction: column;
             align-items: center;
@@ -15,6 +15,8 @@
             margin: 0;
             background-color: #1a202c; /* Dark background */
             color: #e2e8f0; /* Light text */
+            padding: 20px; /* Add some padding for smaller screens */
+            box-sizing: border-box; /* Include padding in element's total width and height */
         }
         .container {
             background: #2d3748; /* Darker container background */
@@ -22,12 +24,13 @@
             border-radius: 8px;
             box-shadow: 0 4px 12px rgba(0,0,0,0.3);
             text-align: center;
-            width: 90%;
-            max-width: 450px;
+            width: 100%; /* Full width on small screens */
+            max-width: 450px; /* Max width for larger screens */
         }
         h1 {
             color: #48bb78; /* Green heading */
             margin-bottom: 20px;
+            font-size: 1.8em; /* Responsive font size */
         }
         .options-box {
             background: #4a5568; /* Even darker box for options */
@@ -35,26 +38,11 @@
             border-radius: 6px;
             margin-bottom: 20px;
         }
-        .checkbox-container {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin-bottom: 15px;
-        }
-        .checkbox-container input[type="checkbox"] {
-            margin-right: 10px;
-            width: 20px;
-            height: 20px;
-            accent-color: #48bb78; /* Green checkbox */
-        }
-        .checkbox-container label {
-            font-size: 1.1em;
-            cursor: pointer;
-        }
         .button-group {
             display: flex;
-            justify-content: space-around;
-            margin-top: 15px;
+            flex-wrap: wrap; /* Allow buttons to wrap on smaller screens */
+            gap: 10px; /* Space between buttons */
+            justify-content: center;
         }
         .auth-button {
             background-color: #4299e1; /* Blue button */
@@ -65,7 +53,8 @@
             cursor: pointer;
             font-size: 1em;
             transition: background-color 0.3s ease;
-            width: 48%; /* To make them side-by-side */
+            flex: 1 1 calc(50% - 10px); /* Grow and shrink, occupy roughly half width with gap */
+            max-width: 200px; /* Limit button width */
         }
         .auth-button:hover {
             background-color: #3182ce;
@@ -86,12 +75,14 @@
             padding: 15px;
         }
         #qrCodeImage {
-            width: 250px;
-            height: 250px;
+            width: 200px; /* Smaller default size */
+            height: 200px;
             border: 1px solid #4a5568;
             padding: 10px;
             border-radius: 5px;
             background-color: white; /* QR codes are usually on white */
+            max-width: 100%; /* Ensure image scales down on small screens */
+            height: auto; /* Maintain aspect ratio */
         }
         .input-group {
             width: 100%;
@@ -111,6 +102,7 @@
             background-color: #4a5568;
             color: #e2e8f0;
             font-size: 1em;
+            box-sizing: border-box; /* Include padding in element's total width and height */
         }
         .input-group button {
             background-color: #48bb78;
@@ -121,6 +113,8 @@
             cursor: pointer;
             font-size: 1em;
             margin-top: 10px;
+            width: 100%; /* Full width button */
+            box-sizing: border-box;
         }
         .input-group button:hover {
             background-color: #38a169;
@@ -142,24 +136,30 @@
             color: #f56565;
             margin-top: 10px;
         }
+
+        /* Basic responsiveness adjustments */
+        @media (max-width: 600px) {
+            .container {
+                padding: 20px;
+            }
+            h1 {
+                font-size: 1.5em;
+            }
+            .auth-button {
+                flex: 1 1 100%; /* Buttons take full width on small screens */
+                max-width: none;
+            }
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🚀 Baileys Bot Authentication</h1>
+        <h1>Baileys Bot Authentication</h1>
 
         <div class="options-box">
-            <div class="checkbox-container">
-                <input type="checkbox" id="customSessionId" checked>
-                <label for="customSessionId">Custom Session ID</label>
-            </div>
-            <div class="input-group" id="sessionIdInputGroup">
-                <label for="sessionId">Session ID (Optional, for multiple bots):</label>
-                <input type="text" id="sessionId" placeholder="e.g., my_first_bot">
-            </div>
             <div class="button-group">
-                <button class="auth-button" id="qrCodeButton">📸 QR Code</button>
-                <button class="auth-button" id="pairingCodeButton">🤝 Pairing Code</button>
+                <button class="auth-button" id="qrCodeButton">QR Code</button>
+                <button class="auth-button" id="pairingCodeButton">Pairing Code</button>
             </div>
         </div>
 
@@ -187,9 +187,6 @@
     <script src="/socket.io/socket.io.js"></script>
     <script>
         const socket = io();
-        const customSessionIdCheckbox = document.getElementById('customSessionId');
-        const sessionIdInputGroup = document.getElementById('sessionIdInputGroup');
-        const sessionIdInput = document.getElementById('sessionId');
         const qrCodeButton = document.getElementById('qrCodeButton');
         const pairingCodeButton = document.getElementById('pairingCodeButton');
         const authDisplayArea = document.getElementById('authDisplayArea');
@@ -206,6 +203,7 @@
         const errorMessageElement = document.getElementById('errorMessage');
 
         let currentAuthMethod = null; // 'qr' or 'pairing'
+        const SESSION_ID = 'default_baileys_session'; // Hardcoded session ID
 
         // --- UI State Management ---
         function resetAuthDisplay() {
@@ -231,6 +229,7 @@
             qrInstructions.style.display = 'block';
             currentAuthMethod = 'qr';
             qrCodeButton.disabled = true;
+            pairingCodeButton.disabled = false; // Enable other button
         }
 
         function showPairingMethod() {
@@ -239,22 +238,16 @@
             pairingCodeInputArea.style.display = 'block';
             currentAuthMethod = 'pairing';
             pairingCodeButton.disabled = true;
+            qrCodeButton.disabled = false; // Enable other button
         }
 
         // Initial state
         resetAuthDisplay();
-        // Hide/show session ID input based on checkbox
-        customSessionIdCheckbox.addEventListener('change', () => {
-            sessionIdInputGroup.style.display = customSessionIdCheckbox.checked ? 'block' : 'none';
-        });
-        sessionIdInputGroup.style.display = customSessionIdCheckbox.checked ? 'block' : 'none';
-
 
         // --- Event Listeners for Buttons ---
         qrCodeButton.addEventListener('click', () => {
             showQrMethod();
-            const sessionId = customSessionIdCheckbox.checked ? sessionIdInput.value.trim() : '';
-            socket.emit('start_auth', { method: 'qr', sessionId: sessionId || 'default_baileys_session' });
+            socket.emit('start_auth', { method: 'qr', sessionId: SESSION_ID });
         });
 
         pairingCodeButton.addEventListener('click', () => {
@@ -272,8 +265,7 @@
             statusElement.textContent = 'Requesting pairing code...';
             statusElement.className = 'connecting';
 
-            const sessionId = customSessionIdCheckbox.checked ? sessionIdInput.value.trim() : '';
-            socket.emit('start_auth', { method: 'pairing', phoneNumber, sessionId: sessionId || 'default_baileys_session' });
+            socket.emit('start_auth', { method: 'pairing', phoneNumber: phoneNumber, sessionId: SESSION_ID });
         });
 
         // --- Socket.IO Listeners ---
@@ -307,15 +299,9 @@
                 statusElement.classList.add('connected');
                 // On successful connection, hide all auth-specific displays
                 authDisplayArea.style.display = 'none';
-                initialMessage.style.display = 'none';
-                qrCodeImage.style.display = 'none';
-                qrInstructions.style.display = 'none';
-                loadingMessage.style.display = 'none';
-                pairingCodeInputArea.style.display = 'none';
-                pairingCodeInstructions.style.display = 'none';
-                errorMessageElement.style.display = 'none';
                 qrCodeButton.disabled = true;
                 pairingCodeButton.disabled = true;
+                statusElement.textContent = 'Bot Connected!';
             } else if (status.connection === 'close') {
                 statusElement.classList.add('disconnected');
                 if (status.reason === 'loggedOut') {
