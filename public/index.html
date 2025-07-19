@@ -220,6 +220,8 @@
             statusElement.className = 'connecting';
             qrCodeButton.disabled = false;
             pairingCodeButton.disabled = false;
+            getPairingCodeButton.disabled = false; // Enable pairing code button
+            phoneNumberInput.disabled = false;
         }
 
         function showQrMethod() {
@@ -228,8 +230,10 @@
             loadingMessage.style.display = 'block';
             qrInstructions.style.display = 'block';
             currentAuthMethod = 'qr';
-            qrCodeButton.disabled = true;
-            pairingCodeButton.disabled = false; // Enable other button
+            qrCodeButton.disabled = true; // Disable QR button once clicked
+            pairingCodeButton.disabled = true; // Also disable pairing button
+            getPairingCodeButton.disabled = true; // Disable the "Get Pairing Code" button too
+            phoneNumberInput.disabled = true;
         }
 
         function showPairingMethod() {
@@ -237,8 +241,9 @@
             initialMessage.style.display = 'none';
             pairingCodeInputArea.style.display = 'block';
             currentAuthMethod = 'pairing';
-            pairingCodeButton.disabled = true;
-            qrCodeButton.disabled = false; // Enable other button
+            pairingCodeButton.disabled = true; // Disable Pairing button once clicked
+            qrCodeButton.disabled = true; // Also disable QR button
+            // getPairingCodeButton and phoneNumberInput remain enabled initially for input
         }
 
         // Initial state
@@ -264,6 +269,8 @@
             errorMessageElement.style.display = 'none'; // Clear previous errors
             statusElement.textContent = 'Requesting pairing code...';
             statusElement.className = 'connecting';
+            getPairingCodeButton.disabled = true; // Disable after sending request
+            phoneNumberInput.disabled = true; // Disable input too
 
             socket.emit('start_auth', { method: 'pairing', phoneNumber: phoneNumber, sessionId: SESSION_ID });
         });
@@ -295,10 +302,13 @@
             statusElement.className = '';
             if (status.connection === 'connecting') {
                 statusElement.classList.add('connecting');
+                qrCodeButton.disabled = true; // Keep disabled while connecting
+                pairingCodeButton.disabled = true;
+                getPairingCodeButton.disabled = true;
+                phoneNumberInput.disabled = true;
             } else if (status.connection === 'open') {
                 statusElement.classList.add('connected');
-                // On successful connection, hide all auth-specific displays
-                authDisplayArea.style.display = 'none';
+                authDisplayArea.style.display = 'none'; // Hide auth area on success
                 qrCodeButton.disabled = true;
                 pairingCodeButton.disabled = true;
                 statusElement.textContent = 'Bot Connected!';
